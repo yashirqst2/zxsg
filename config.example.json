@@ -1,0 +1,24 @@
+{
+  "paths": {
+    "baidu_download": "D:/BaiduNetdiskDownload",
+    "mp4_dir": "D:/Add mp4"
+  },
+  "browser": {
+    "chromedriver_path": "chromedriver.exe",
+    "page_load_timeout": 25
+  },
+  "save_to_panbaidu": {
+    "target_folder": "nztd"
+  },
+  "extractor": {
+    "seven_zip_path": "C:/Software/7-Zip/7z.exe",
+    "file_extensions": [".7z", ".zip", ".rar"],
+    "fallback_passwords": [
+      "www.zuxiashiguang.com"
+    ],
+    "delete_after_extract": false
+  },
+  "rename": {
+    "video_extensions": [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".flv", ".m4v"]
+  }
+}
