@@ -48,6 +48,13 @@ def archive_base_name(file_name: str) -> str:
     return name
 
 
+def clean_filename(filename: str) -> str:
+    """清理文件名中的非法字符（05 重命名和 status 诊断共用）"""
+    cleaned = re.sub(r'[\\/:*?"<>|]', '_', filename or "")
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip().rstrip('.')
+
+
 def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 

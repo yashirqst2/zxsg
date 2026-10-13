@@ -122,3 +122,58 @@ def test_add_link_never_overwrites(tmp_path, monkeypatch):
     s.upsert("1", extract_status="ok", title="T")
     assert not s.add_link("https://www.zuxiashiguang.com/forum.php?mod=viewthread&tid=1")
     assert s.get("1")["extract_status"] == "ok" and s.pending_extraction() == []
+
+
+def test_select_redo():
+    select = load_script("03_save_to_panbaidu.py").select_redo
+    records = [
+        {"tid": "1", "save_status": "ok", "saved_at": "2026-10-08T10:00:00"},
+        {"tid": "2", "save_status": "ok", "saved_at": "2026-10-09T18:00:00"},
+        {"tid": "3", "save_status": "ok", "saved_at": "2026-10-09T18:20:00"},
+        {"tid": "4", "save_status": "failed"},
+    ]
+    tids = lambda rs: sorted(r["tid"] for r in rs)
+    assert tids(select(records, "last")) == ["2", "3"]
+    assert tids(select(records, "all")) == ["1", "2", "3"]
+    assert tids(select(records, "2026-10-09 18:10")) == ["3"]
+    assert tids(select(records, "1,4")) == ["1"]   # 未转存成功的不算重做
+
+
+def test_share_key_matches_both_url_forms():
+    key = load_script("03_save_to_panbaidu.py").share_key("https://pan.baidu.com/s/1TXItXt0fQv1TQHG4mLQTeg")
+    assert key == "TXItXt0fQv1TQHG4mLQTeg"
+    assert key in "https://pan.baidu.com/s/1TXItXt0fQv1TQHG4mLQTeg?pwd=X1WJ"
+    assert key in "https://pan.baidu.com/share/init?surl=TXItXt0fQv1TQHG4mLQTeg&pwd=X1WJ"
+
+
+def test_clean_filename():
+    from common.store import clean_filename
+    assert clean_filename(r'a\b/c:d*?"<>|  e.') == "a_b_c_d______ e"
+
+
+def test_file_name_conflict_diagnosis(tmp_path):
+    import status
+    records = [
+        {"tid": "1", "file_name": "TLZB-1", "baidu_link": "A", "title": "甲"},
+        {"tid": "2", "file_name": "TLZB-1", "baidu_link": "B", "title": "乙"},
+        {"tid": "3", "file_name": "TLZB-3", "baidu_link": "C", "title": "丙"},
+        {"tid": "4", "file_name": "TLZB-4", "baidu_link": "D", "title": "丁"},
+    ]
+    conflicts = status.file_name_conflicts(records)
+    assert sorted(conflicts) == ["1", "2"]
+
+    downloads, videos = tmp_path / "dl", tmp_path / "mp4"
+    downloads.mkdir(); videos.mkdir()
+    (downloads / "TLZB-3.7z").write_text("x")
+    assert "--redo 2" in status.diagnose_not_found(records[1], conflicts, downloads, videos)
+    assert "还在下载目录" in status.diagnose_not_found(records[2], conflicts, downloads, videos)
+    assert "还没在百度网盘客户端下载" in status.diagnose_not_found(records[3], conflicts, downloads, videos)
+
+
+def test_prune_reports_keeps_latest(tmp_path):
+    rename = load_script("05_rename_mp4_files.py")
+    for day in range(1, 26):
+        (tmp_path / f"rename_report_202610{day:02d}_120000.txt").write_text("x")
+    rename.prune_reports(tmp_path, keep=20)
+    remaining = sorted(p.name for p in tmp_path.glob("rename_report_*.txt"))
+    assert len(remaining) == 20 and remaining[0] == "rename_report_20261006_120000.txt"

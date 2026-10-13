@@ -7,10 +7,15 @@ python status.py --all    # 同时列出已全部完成的帖子
 """
 
 import sys
+from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from common import config
 from common.config import LINKS_FILE
-from common.store import ThreadStore, thread_id
+from common.store import ThreadStore, archive_base_name, clean_filename, thread_id
+
+NOT_FOUND_WARN_AFTER = 2   # 05 连续这么多次找不到视频时，给出诊断
 
 # (步骤号, 名称, 状态字段, 错误字段)
 STEPS = [
@@ -51,10 +56,49 @@ def pending_links(store: ThreadStore) -> List[str]:
     return links
 
 
+def file_name_conflicts(records) -> Dict[str, List[dict]]:
+    """
+    不同的分享链接却记录了同一个网盘文件名 → {tid: [冲突的其它记录]}。
+    正常情况下不可能出现，说明 03 转存错了分享（例如页面卡在上一个分享上）。
+    """
+    by_name = defaultdict(list)
+    for r in records:
+        if r.get("file_name"):
+            by_name[r["file_name"].lower()].append(r)
+    conflicts = {}
+    for group in by_name.values():
+        if len({r.get("baidu_link") for r in group}) > 1:
+            for r in group:
+                conflicts[r["tid"]] = [o for o in group if o["tid"] != r["tid"]]
+    return conflicts
+
+
+def diagnose_not_found(record: dict, conflicts: Dict[str, List[dict]],
+                       download_dir: Path, mp4_dir: Path) -> str:
+    """05 一直找不到视频时，推测原因并给出处理办法"""
+    file_name = record["file_name"]
+    if record["tid"] in conflicts:
+        other = conflicts[record["tid"]][0]
+        return (f"网盘文件名 {file_name} 和另一个帖子【{other.get('title')}】重复，很可能转存错了分享"
+                f" → python 03_save_to_panbaidu.py --redo {record['tid']}")
+    if download_dir.exists():
+        archives = [p.name for p in download_dir.rglob("*")
+                    if p.is_file() and archive_base_name(p.name).lower() == file_name.lower()]
+        if archives:
+            return f"压缩包 {archives[0]} 还在下载目录，没有解压成功 → 运行 04 查看错误"
+    if (mp4_dir / f"{clean_filename(record.get('title') or '')}.mp4").exists():
+        return f"{mp4_dir} 里已经有这个标题的视频，可能之前手动改过名"
+    return (f"下载目录和视频目录里都没有 {file_name}：可能还没在百度网盘客户端下载，"
+            f"或解压出来的文件名和 {file_name} 不一样")
+
+
 def main() -> None:
     show_all = "--all" in sys.argv
     store = ThreadStore()
     new_links = pending_links(store)
+    conflicts = file_name_conflicts(store)
+    download_dir = Path(config.get("paths.baidu_download"))
+    mp4_dir = Path(config.get("paths.mp4_dir"))
 
     groups: Dict[int, List[Tuple[dict, str, Optional[str]]]] = {n: [] for n, *_ in STEPS}
     done = []
@@ -78,6 +122,13 @@ def main() -> None:
     print(f"  ✅ 全部完成: {len(done)}")
     print(f"  合计帖子: {len(store.records)}")
 
+    if conflicts:
+        print(f"\n── ⚠️ 数据异常：不同分享链接记录了同一个网盘文件名 ({len(conflicts)})")
+        for tid in conflicts:
+            record = store.get(tid)
+            print(f"  ⚠️ [{tid}] {record.get('title')} [{record.get('file_name')}]  转存于 {record.get('saved_at') or '-'}")
+        print("      其中只有一个是对的；转存错的那个用 03_save_to_panbaidu.py --redo <帖子ID> 重新转存")
+
     if new_links:
         print(f"\n── links.txt 中未登记的链接 → {STEP_HINTS[2]}")
         for url in new_links:
@@ -96,7 +147,12 @@ def main() -> None:
             if status == "failed" and error:
                 print(f"      原因: {error}")
             elif status == "not_found":
-                print(f"      原因: {error or '未找到对应视频文件'}")
+                count = record.get("not_found_count") or 1
+                if count >= NOT_FOUND_WARN_AFTER:
+                    print(f"      ⚠️ 已连续 {count} 次未找到视频，"
+                          f"{diagnose_not_found(record, conflicts, download_dir, mp4_dir)}")
+                else:
+                    print(f"      原因: {error or '未找到对应视频文件'}")
 
     if show_all and done:
         print(f"\n── 全部完成 ({len(done)})")

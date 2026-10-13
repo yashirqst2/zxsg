@@ -19,19 +19,13 @@ from typing import List
 
 from common import config
 from common.config import REPORTS_DIR
-from common.store import ThreadStore, now
+from common.store import ThreadStore, clean_filename, now
 
 MP4_DIRECTORY = Path(config.get("paths.mp4_dir"))
 VIDEO_EXTENSIONS = {e.lower() for e in config.get("rename.video_extensions", [".mp4"])}
 # 每次运行生成一份带时间的报告，不覆盖之前的
 REPORT_FILE = REPORTS_DIR / f"rename_report_{datetime.now():%Y%m%d_%H%M%S}.txt"
-
-
-def clean_filename(filename: str) -> str:
-    """清理文件名中的非法字符"""
-    cleaned = re.sub(r'[\\/:*?"<>|]', '_', filename or "")
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned.strip().rstrip('.')
+KEEP_REPORTS = 20
 
 
 def find_videos(directory: Path, file_name: str) -> List[Path]:
@@ -68,15 +62,19 @@ def main() -> None:
         return
 
     store = ThreadStore()
-    records = [r for r in store if r.get("file_name") and r.get("title")
-               and r.get("rename_status") != "ok"]
+    candidates = [r for r in store if r.get("file_name") and r.get("title")
+                  and r.get("rename_status") != "ok"]
+    # 还没解压的视频肯定找不到，先跳过，免得被误记为"未找到"
+    records = [r for r in candidates if r.get("unzip_status") == "ok"]
+    if len(candidates) > len(records):
+        print(f"ℹ️ 跳过 {len(candidates) - len(records)} 条还没解压的（先运行 04）")
     if not records:
-        print("⚠️ 没有需要重命名的记录（需要 03 已记录文件名）")
+        print("没有需要重命名的记录")
         return
     print(f"📁 目录: {MP4_DIRECTORY}")
     print(f"共 {len(records)} 条待处理记录\n")
 
-    renamed, not_found, failed = [], [], []
+    renamed, not_found, new_not_found, failed = [], [], [], []
     for i, record in enumerate(records, 1):
         file_name, title = record["file_name"], record["title"]
         print(f"[{i}/{len(records)}] {file_name} → {title}")
@@ -89,10 +87,15 @@ def main() -> None:
 
         videos = find_videos(MP4_DIRECTORY, file_name)
         if not videos:
+            # 记录连续找不到的次数：第一次出现才写进报告，多次找不到由 status.py 给出诊断
+            count = (record.get("not_found_count") or 0) + 1
+            if count == 1:
+                new_not_found.append((file_name, title))
             not_found.append((file_name, title))
-            print("  ⚠️ 未找到对应视频文件")
+            print("  ⚠️ 未找到对应视频文件" + (f"（已连续 {count} 次，运行 status.py 查看可能原因）" if count > 1 else ""))
             if not dry_run:
-                store.upsert(record["tid"], rename_status="not_found", rename_error="未找到对应视频文件")
+                store.upsert(record["tid"], rename_status="not_found", rename_error="未找到对应视频文件",
+                             not_found_count=count)
             continue
 
         new_names, errors = [], []
@@ -118,7 +121,7 @@ def main() -> None:
         if not dry_run:
             store.upsert(record["tid"], rename_status="failed" if errors else "ok",
                          renamed_to=new_names or None, rename_error="; ".join(errors) or None,
-                         **({} if errors else {"renamed_at": now()}))
+                         not_found_count=None, **({} if errors else {"renamed_at": now()}))
     if not dry_run:
         store.save()
 
@@ -131,6 +134,11 @@ def main() -> None:
     if dry_run:
         return
 
+    # 没有新结果（只是重复之前就找不到的那些）时不生成报告，避免报告越积越多
+    if not (renamed or failed or new_not_found):
+        print("ℹ️ 本次没有新的结果，不生成报告。未找到的条目可运行 status.py 查看可能原因")
+        return
+
     lines = [f"重命名报告  {datetime.now():%Y-%m-%d %H:%M:%S}", f"目录: {MP4_DIRECTORY}", ""]
     lines.append(f"== 成功 ({len(renamed)}) ==")
     lines += [f"{old} → {new}" for old, new in renamed]
@@ -141,6 +149,13 @@ def main() -> None:
     REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
     REPORT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"📄 报告已写入: {REPORT_FILE}")
+    prune_reports(REPORT_FILE.parent)
+
+
+def prune_reports(directory: Path, keep: int = KEEP_REPORTS) -> None:
+    """只保留最近的若干份重命名报告（文件名里的时间可以直接按字符串排序）"""
+    for old in sorted(directory.glob("rename_report_*.txt"))[:-keep]:
+        old.unlink()
 
 
 if __name__ == "__main__":
